@@ -1,0 +1,122 @@
+#include <Wire.h>
+#include "MAX30105.h"
+#include "heartRate.h"
+#include <SD.h>
+#include <avr/sleep.h>
+#include <avr/power.h>
+#include <avr/interrupt.h>
+#include <avr/wdt.h>
+
+#define WORKING_PERIOD_MS 60000  // 1 minuto
+#define SLEEP_PERIOD_MIN   1    // 59 minutos
+
+const byte RATE_SIZE = 8;
+long lastBeat = 0; 
+float beatsPerMinute, beatsPerMinute2;
+int beatAvg, beatAvg2;
+volatile bool wakeUpFlag = false;
+uint32_t startTime;
+
+File myFile;
+MAX30105 particleSensor;
+byte rates[RATE_SIZE]; 
+byte rateSpot = 0;
+
+void setup() {
+  Serial.begin(115200);
+  Serial.print("Inicializando...");
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
+    Serial.print("Error ");
+    for (;;);
+  } else {
+    Serial.println("Exito");
+  }
+  
+  particleSensor.setup(); 
+  particleSensor.setPulseAmplitudeRed(0x50); 
+  particleSensor.setPulseAmplitudeGreen(0);
+
+  Serial.print("Iniciando SD ...");
+  if (!SD.begin(4)) {
+    Serial.println("No se pudo inicializar");
+    return;
+  }
+  Serial.println("inicialización exitosa");
+  
+  if (!SD.exists("data.csv")) {
+    myFile = SD.open("data.csv", FILE_WRITE);
+    if (myFile) {
+      Serial.println("Archivo nuevo, Escribiendo encabezado(fila 1)");
+    
+    } else {
+      Serial.println("Error creando el archivo datalog.csv");
+    }
+  }
+  
+  startTime = millis();
+  setupWatchdogTimer();
+}
+
+void loop() {
+  uint32_t currentTime = millis();
+  
+  // Trabajar durante 1 minuto
+  if (currentTime - startTime < WORKING_PERIOD_MS) {
+    long irValue = particleSensor.getIR();
+
+    if (checkForBeat(irValue) == true) {
+      long delta = millis() - lastBeat;
+      lastBeat = millis();
+      
+      beatsPerMinute = 60 / (delta / 1000.0);
+      
+      if (beatsPerMinute < 255 && beatsPerMinute > 20) {
+        rates[rateSpot++] = (byte)beatsPerMinute;
+        rateSpot %= RATE_SIZE; 
+        
+        beatAvg = 0;
+        for (byte x = 0; x < RATE_SIZE; x++)
+          beatAvg += rates[x];
+        beatAvg /= RATE_SIZE;
+      }
+    }
+
+   myFile = SD.open("data.csv", FILE_WRITE);
+    if (myFile) {
+      myFile.print(beatsPerMinute);
+      myFile.print(",");
+      myFile.println(beatAvg);
+      myFile.close();
+      
+      Serial.print("BPM=");
+      Serial.print(beatsPerMinute);
+      Serial.print(", Avg BPM=");
+      Serial.println(beatAvg);
+
+  } else {
+    // Entrar en modo de sueño durante 59 minutos
+    for (int i = 0; i < SLEEP_PERIOD_MIN; i++) {
+    enterSleepMode();
+    }
+    startTime = millis();  // Reiniciar el contador de tiempo
+  }
+  }
+}
+
+void setupWatchdogTimer() {
+  MCUSR &= ~(1<<WDRF); // Borrar el reset flag del watchdog
+  WDTCSR |= (1<<WDCE) | (1<<WDE); // Habilitar cambios al Watchdog
+  WDTCSR = (1<<WDIE) | (1<<WDP3); // Configurar para interrupciones cada 8 segundos
+}
+
+void enterSleepMode() {
+  set_sleep_mode(SLEEP_MODE_PWR_DOWN);  // Configurar el modo de sueño
+  sleep_enable();  // Habilitar el modo de sueño
+  sleep_cpu();  // Dormir el microcontrolador
+  sleep_disable();
+}
+
+// ISR para manejar la interrupción del Watchdog Timer
+ISR(WDT_vect) {
+  // El microcontrolador se despertará aquí, pero no se necesita hacer nada más
+}
